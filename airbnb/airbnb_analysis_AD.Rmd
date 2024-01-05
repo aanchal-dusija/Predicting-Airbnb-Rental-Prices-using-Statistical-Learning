@@ -1,0 +1,322 @@
+---
+title: "Airbnb Data"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list = ls())
+library(tidyverse)
+library(leaflet)
+library(maps)
+library(sp)
+library(rgdal)
+library(htmlwidgets)
+library(corrplot)
+library(randomForest)
+library(caret)
+library(Metrics)
+library(rpart)
+library(rpart.plot)
+library(readxl)
+library(tidyverse)
+library(xgboost)
+
+dir = "/Users/aanchaldusija/Downloads/ANLY 512 Project/airbnb/"
+input <- paste0(dir, "input/")
+
+```
+
+
+Search for all files in the input folder, import and combine
+```{r}
+files <- list.files(input, full.names = T)
+
+read_listings <- function(x) {
+  date = str_extract(x, "listings_[0-9\\.]+")
+  date = gsub("listings_", "", date)
+  date = substr(date, 1, nchar(date)-1)
+  out <- read.csv(x)
+  out$date = date
+  return(out)
+}
+
+dat <- lapply(files, function(x) read_listings(x))
+dat <- data.table::rbindlist(dat)
+dat <- data.frame(dat)
+
+```
+
+Data Cleaning   
+```{r}
+#format dates, added time_since_last_review column and removed two columns
+dat <- dat %>%
+  mutate(date = as.Date(date, format = "%Y.%m.%d"),
+         last_review = as.Date(last_review),
+         time_since_last_review = as.numeric(date - last_review)) %>%
+  select(-neighbourhood_group, -license)
+
+```
+
+
+# Exploratory Data Analysis 
+
+Inspect outcome variable
+```{r}
+#Confirm distribution of outcome variable (price)
+
+hist(dat$price)
+
+#Price is skewed
+quantile(dat$price, probs = seq(0, 1, by = 0.01))
+
+#We see extreme skew after ~$1500. Lets cutoff that, as well as <$30 price house (1st percentile)
+cutoff_lb = 30
+cutoff_ub = 1500
+
+
+dat <- dat %>%
+  filter(price >= cutoff_lb & price <= cutoff_ub)
+
+hist(dat$price)
+
+#Price is still right skewed, so we may want to take logs
+dat <- dat %>%
+  mutate(log_price = log(price))
+
+# Set bin size and color
+bin_size <- 0.1
+colors <- "#FF5A60"
+
+# Create the histogram plot with custom bin size and colors
+hist(dat$log_price, 
+     col = colors,
+     main = "Histogram of Log Prices", xlab = "Log Price ($)")
+#We tend to take logs on skewed data to make the the data more normally distributed
+
+```
+
+Inspect explanatory variables
+
+```{r}
+table(dat$room_type)
+
+hist(dat$minimum_nights)
+quantile(dat$minimum_nights, probs = seq(0, 1, by = 0.01))
+
+#There are some places that are long term stays only, there's also a weird outlier at 1100. Let's omit that and create a dummy for long term stays
+dat <- dat %>%
+  mutate(long_stay = ifelse(minimum_nights > 14, 1, 0)) %>%
+  filter(minimum_nights < 1100)
+
+
+#Number of reviews
+quantile(dat$number_of_reviews, probs = seq(0, 1, by = 0.01))
+
+hist(dat$time_since_last_review)
+#Some properties haven't had a review in thousands of days. This implies the property listing may be old and outdated (no one has stayed there in years). Let's create a dummy to indicate if a property hasn't had a review in over 1 year
+
+dat <- dat%>%
+  mutate(old_listing = ifelse(time_since_last_review > 365, 1, 0))
+quantile(dat$time_since_last_review, na.rm = T)
+
+#Source says data is as of 3/16, but some listings have reviews past that. Let's treat them as miscoded and drop
+dat <- dat %>% 
+  filter(time_since_last_review > 0)
+
+```
+
+
+We're interested in price trends over time, so lets see how median price changes over time
+```{r}
+sum_time <- dat %>%
+  group_by(date) %>%
+  summarise(med_price = median(price),
+            mean_price = median(price),
+            n_obs = n())
+
+ggplot(data = sum_time, aes(x = date, y = med_price)) + geom_point() +
+  # geom_text(aes(x = date+4, y = med_price + 2.5, label = paste("n = \n", n_obs))) 
+  geom_text(aes(x = date+3, y = med_price + 2.5, label = paste0("$", round(med_price, 2)))) +
+  geom_line()
+
+```
+
+As we can see, over the months the prices of listings expereince a drop. This can be for a variety of reasons such as Christmas and people traveling during the holidays. The increase in price can be due to SWSW, a music festival that happens every march. 
+
+
+Spatial analysis of most expensive neighborhoods
+```{r}
+neighborhood <- dat %>%
+  group_by(neighbourhood) %>%
+  summarize(min_lat = min(latitude),
+            max_lat = max(latitude), 
+            min_lon = min(longitude), 
+            max_lon = max(longitude),
+            avg_lat = mean(latitude),
+            avg_lon = mean(longitude),
+            avg_price = mean(price),
+            med_price = median(price),
+            n_listings = n())
+
+m <- leaflet(neighborhood) %>% 
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addCircleMarkers(~avg_lon, ~avg_lat,
+             radius = ~med_price/50,
+             label = ~med_price)
+m
+
+
+```
+```{r}
+# Define custom marker color
+my_color <- "black"
+
+# Create the leaflet map with custom marker color
+m <- leaflet(neighborhood) %>% 
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addCircleMarkers(~avg_lon, ~avg_lat,
+             radius = ~med_price/50,
+             label = ~med_price,
+             color = my_color)
+m
+
+```
+
+
+Most Expensive Neighborhood plot
+```{r}
+ggplot(data  = neighborhood, aes(x = reorder(neighbourhood, med_price), y = med_price)) + 
+  geom_bar(stat = "identity") +
+  coord_flip()
+
+hist(neighborhood$med_price)
+#Looks like there are 2 neighborhoods that are much more expensive than the others(78656 & )
+```
+```{r}
+library(ggplot2)
+library(dplyr)
+
+neighborhood_names <- data.frame(
+  neighbourhood = c("78611", "76530", "78616", "78602", "78613", "76574", "78610", "78612", "78605", "78615"),
+  area_name = c("Burnet", "Granger", "McMahan", "Bastrop", "Cedar Park", "Taylor", "Buda", "Cedar Creek", "Bertram", "Greater Austin")
+)
+
+neighborhood <- merge(neighborhood, neighborhood_names, by = "neighbourhood")
+
+# Create a bar plot of the median prices by neighborhood, showing only the top 10 neighborhoods
+ggplot(data = neighborhood %>%
+         slice(1:10) %>%
+         top_n(10, med_price),
+       aes(x = reorder(area_name, med_price), y = med_price)) + 
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(title = "Most Expensive Neighborhoods",
+       x = "Neighborhood",
+       y = "Median Price") +
+  theme(panel.background = element_blank())
+
+
+```
+
+
+```{r}
+# Load the corrplot package
+library(corrplot)
+
+# Select only the numeric variables from the dat dataset
+num_vars <- dat %>% select_if(is.numeric)
+
+# Create the correlation matrix for the numeric variables, with missing values removed
+my_cor_matrix <- cor(num_vars, use = "pairwise.complete.obs")
+
+# Create the correlation plot with a custom color palette
+corrplot(my_cor_matrix, method = "color", type = "upper", addCoef.col = "black",tl.col="black",number.cex = 0.4, col = colorRampPalette(c("#e8e8e8","#b7b7b7", "#525252"))(50))
+
+
+```
+## Random Forest
+
+```{r}
+
+dat1<- subset(dat, select = -c(price,id,host_id, last_review, name))
+# Set the seed for reproducibility
+set.seed(123)
+
+# Split the data into training and testing sets
+trainIndex <- createDataPartition(dat1$log_price, p = 0.7, list = FALSE)
+trainData <- dat1[trainIndex, ]
+testData <- dat1[-trainIndex, ]
+
+# rf.model<-randomForest(log_price~neighbourhood+number_of_reviews+reviews_per_month+availability_365+number_of_reviews_ltm+time_since_last_review+long_stay+old_listing, data = trainData, mtry = 6, importance = TRUE)
+rf.model<-randomForest(log_price~., data = trainData, mtry = 4, importance = TRUE)
+rf.model
+
+# PREDICTING 
+rf.predict<-predict(rf.model, newdata = testData)
+# View(rf.predict)
+
+# RMSE 
+rmse <- rmse(testData$log_price, rf.predict)
+
+# Variable Importance Plot
+varImpPlot(rf.model)
+
+# CALCULATING RESIDUALS
+residuals <- testData$log_price - rf.predict
+
+# CALCULATING TOTAL SUM OF SQUARES (TSS)
+tss <- sum((testData$log_price - mean(testData$log_price))^2)
+
+# CALCULATING RESIDUAL SUM OF SQUARES (RSS)
+rss <- sum(residuals^2)
+
+# CALCULATING R-SQUARED (R^2)
+r_squared <- 1 - (rss / tss)
+cat("R-squared: ", r_squared, "\n")
+
+# CALCULATING ADJUSTED R-SQUARED
+n <- nrow(testData) # number of observations
+p <- length(rf.model$terms) - 1 # number of predictor variables
+adjusted_r_squared <- 1 - (((1 - r_squared) * (n - 1)) / (n - p - 1))
+cat("Adjusted R-squared: ", adjusted_r_squared, "\n")
+cat("RMSE: ", rmse, "\n")
+
+```
+```{r}
+tree1 = rpart(log_price~.,data = testData, method = 'class')
+rpart.plot(tree1,type = 4)
+```
+```{r}
+tree1_simpler <- rpart(log_price ~ ., data = testData, method = 'class', control = rpart.control(cp = 0.1))
+
+# Plot the simpler tree
+rpart.plot(tree1_simpler)
+```
+
+
+# BAGGING
+```{r}
+ind <- sample(nrow(dat), 0.8*nrow(dat), replace = F)
+test <- dat[ind,]
+train <- dat[ind,]
+
+mod_bag <- train(
+  log_price ~ as.factor(room_type) + reviews_per_month + 
+    as.factor(long_stay) + as.factor(old_listing) + 
+    as.factor(date),
+  data = train,
+  method = "treebag",
+  nbagg = 50
+)
+
+mod_bag
+
+pred <- predict(mod_bag, newdata = test)
+
+print(paste0("Bagging Test RMSE = ", round(RMSE(pred, test$log_price),3)))
+
+
+
+```
+

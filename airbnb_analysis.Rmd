@@ -1,0 +1,393 @@
+---
+title: "Airbnb Data"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#rm(list = ls())
+library(tidyverse)
+library(leaflet)
+library(maps)
+library(sp)
+library(rgdal)
+library(htmlwidgets)
+
+dir = "/Users/Ahmed/Documents/R Projects/ANLY 512 Project/airbnb/"
+input <- paste0(dir, "input/")
+```
+
+
+Search for all files in the input folder, import and combine
+```{r}
+files <- list.files(input, full.names = T)
+
+read_listings <- function(x) {
+  date = str_extract(x, "listings_[0-9\\.]+")
+  date = gsub("listings_", "", date)
+  date = substr(date, 1, nchar(date)-1)
+  out <- read.csv(x)
+  out$date = date
+  return(out)
+}
+
+dat <- lapply(files, function(x) read_listings(x))
+dat <- data.table::rbindlist(dat)
+dat <- data.frame(dat)
+
+```
+
+Data Cleaning   
+```{r}
+#format dates, added time_since_last_review column and removed two columns
+dat <- dat %>%
+  mutate(date = as.Date(date, format = "%Y.%m.%d"),
+         last_review = as.Date(last_review),
+         time_since_last_review = as.numeric(date - last_review)) %>%
+  select(-neighbourhood_group, -license)
+
+```
+
+
+# Exploratory Data Analysis 
+
+Inspect outcome variable
+```{r}
+#Confirm distribution of outcome variable (price)
+
+hist(dat$price)
+
+#Price is skewed
+quantile(dat$price, probs = seq(0, 1, by = 0.01))
+
+#We see extreme skew after ~$1500. Lets cutoff that, as well as <$30 price house (1st percentile)
+cutoff_lb = 30
+cutoff_ub = 1500
+
+
+dat <- dat %>%
+  filter(price >= cutoff_lb & price <= cutoff_ub)
+
+hist(dat$price)
+
+#Price is still right skewed, so we may want to take logs
+dat <- dat %>%
+  mutate(log_price = log(price))
+
+hist(dat$log_price)
+#We tend to take logs on skewed data to make the the data more normally distributed
+
+```
+
+Inspect explanatory variables
+
+```{r}
+table(dat$room_type)
+
+hist(dat$minimum_nights)
+quantile(dat$minimum_nights, probs = seq(0, 1, by = 0.01))
+
+#There are some places that are long term stays only, there's also a weird outlier at 1100. Let's omit that and create a dummy for long term stays
+dat <- dat %>%
+  mutate(long_stay = ifelse(minimum_nights > 14, 1, 0)) %>%
+  filter(minimum_nights < 1100)
+
+
+#Number of reviews
+quantile(dat$number_of_reviews, probs = seq(0, 1, by = 0.01))
+
+hist(dat$time_since_last_review)
+#Some properties haven't had a review in thousands of days. This implies the property listing may be old and outdated (no one has stayed there in years). Let's create a dummy to indicate if a property hasn't had a review in over 1 year
+
+dat <- dat%>%
+  mutate(old_listing = ifelse(time_since_last_review > 365, 1, 0))
+quantile(dat$time_since_last_review, na.rm = T)
+
+#Source says data is as of 3/16, but some listings have reviews past that. Let's treat them as miscoded and drop
+dat <- dat %>% 
+  filter(time_since_last_review > 0)
+
+```
+
+
+We're interested in price trends over time, so lets see how median price changes over time
+```{r}
+sum_time <- dat %>%
+  group_by(date) %>%
+  summarise(med_price = median(price),
+            mean_price = median(price),
+            n_obs = n())
+
+ggplot(data = sum_time, aes(x = date, y = med_price)) + geom_point() +
+  # geom_text(aes(x = date+4, y = med_price + 2.5, label = paste("n = \n", n_obs))) 
+  geom_text(aes(x = date+3, y = med_price + 2.5, label = paste0("$", round(med_price, 2)))) +
+  geom_line()
+
+```
+
+As we can see, over the months the prices of listings expereince a drop. This can be for a variety of reasons such as Christmas and people traveling during the holidays. The increase in price can be due to SWSW, a music festival that happens every march. 
+
+
+Spatial analysis of most expensive neighborhoods
+```{r}
+neighborhood <- dat %>%
+  group_by(neighbourhood) %>%
+  summarize(min_lat = min(latitude),
+            max_lat = max(latitude), 
+            min_lon = min(longitude), 
+            max_lon = max(longitude),
+            avg_lat = mean(latitude),
+            avg_lon = mean(longitude),
+            avg_price = mean(price),
+            med_price = median(price),
+            n_listings = n())
+
+my_pal <- colorFactor(c("blue", "red"), domain = neighborhood$med_price)
+
+
+m <- leaflet(neighborhood) %>% 
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addCircleMarkers(~avg_lon, ~avg_lat,
+             radius = ~med_price/50,
+             color = ~my_pal(med_price),
+             label = ~med_price) 
+m
+
+
+```
+
+
+Most Expensive Neighborhood plot
+```{r}
+tmp <- neighborhood %>% arrange(-med_price)
+tmp <- tmp[1:10,]
+
+
+ggplot(data = tmp, aes(x = reorder(neighbourhood, med_price), y = med_price)) + 
+  geom_bar(stat = "identity") + labs(x= "Median Price per Neighborhood", y="Neighborhood")
+
+hist(neighborhood$med_price)
+#Looks like there are 2 neighborhoods that are much more expensive than the others(78656 & 78732 )
+```
+
+#Save CSV
+
+```{r}
+#write.csv(dat, 'clean_airbnb.csv')
+```
+
+```{r}
+library(caret)
+set.seed(1234)
+
+ind <- sample(nrow(dat), 0.8*nrow(dat), replace = F)
+test <- dat[ind,]
+train <- dat[ind,]
+
+mod_bag <- train(
+  log_price ~ as.factor(room_type) + reviews_per_month + 
+    as.factor(long_stay) + as.factor(old_listing) + 
+    as.factor(date),
+  data = train,
+  method = "treebag",
+  nbagg = 50
+)
+
+mod_bag
+
+pred <- predict(mod_bag, newdata = test)
+
+
+reg_linear <- lm(log_price ~ as.factor(room_type) + reviews_per_month + 
+    as.factor(long_stay) + as.factor(old_listing) + 
+    as.factor(date), data = train)
+pred_lin <- predict(reg_linear, newdata = test)
+
+print(paste0("Bagging Test RMSE = ", round(RMSE(pred, test$log_price),3)))
+print(paste0("Linear Test RMSE = ", round(RMSE(pred_lin, test$log_price),3)))
+
+print(paste0("Bagging Test R2 = ", round(R2(pred, test$log_price),3)))
+print(paste0("Linear Test R2 = ", round(R2(pred_lin, test$log_price),3)))
+
+```
+
+EXPLANATION:
+Here we see that the bagging analysis leads to a relatively poor model with high RMSE and poor R2 (0.652/0.265). In fact, this bagging model is outperformed by a simple linear regression using the same features, suggesting that a bagging approach should not be used in this analysis to predict prices. 
+
+
+
+XG Boost
+
+```{r}
+library(readxl)
+library(tidyverse)
+library(xgboost)
+library(caret)
+```
+
+# Read Data
+
+```{r}
+xgboost_data <- subset(dat, select = -c(id, host_id, longitude, price, name, host_name, latitude, long_stay, old_listing, last_review, neighbourhood))
+#Removed the unecessary columns 
+```
+
+```{r}
+names(xgboost_data)
+str(xgboost_data)
+```
+
+```{r}
+xgboost_d1 <- predict(dummyVars(~room_type,xgboost_data), newdata = xgboost_data)
+xgboost_d2 <- predict(dummyVars(~as.character(date),xgboost_data), newdata = xgboost_data)
+
+#Changed room_type into a dummy variable as its a categorical variable and xgboost only works with matrix (numerical) data
+xgboost_data <- cbind(xgboost_data, xgboost_d1, xgboost_d2) # Combines the dataframe
+xgboost_data <- subset(xgboost_data, select = -c(room_type, date)) # Remove room_type
+```
+
+
+## Create training set indices with 80% of data: we are using the caret package to do this
+
+```{r}
+set.seed(100)  # For reproducibility
+# Create index for testing and training data
+inTrain <- createDataPartition(y = xgboost_data$log_price, p = 0.8, list = FALSE)
+# subset xgboost_data to training
+train <- xgboost_data[inTrain,]
+# subset the rest to test
+test <- xgboost_data[-inTrain,]
+```
+
+```{r}
+train_features <- subset(train, select = -c(log_price)) %>%
+  data.frame()
+
+train_labels <- train$log_price                         #y_train
+
+test_features <- subset(test, select = -c(log_price)) %>%
+  data.frame()
+
+test_labels <- test$log_price                           #y_test
+
+
+dtrain <- xgb.DMatrix(data = as.matrix(train_features), label = train_labels)
+params <- list(objectives = 'reg:squarederror', eval_metric = 'rmse', nthread = 4 , eta = 0.01, max_depth = 4, nrounds = 10, gamma = 0, min_child_weight = 1, subsample = 1, colsample_bytree = seq(0.5, 0.9, length.out = 5))
+
+bstDMatrix <- xgboost(data = dtrain, max.depth = 2, eta = 1, nthread = 4, nrounds = 10)
+
+```
+
+```{r}
+dtest <- xgb.DMatrix(data = as.matrix(test_features), label = test_labels)
+
+y_pred <- predict(bstDMatrix, newdata = dtest)
+
+error <- RMSE(test_labels, y_pred) 
+
+R2 <- R2(test_labels, y_pred) 
+
+cat("The RMSE Error is", mean(error), "\n")
+
+cat("The R^2 is", R2)
+
+```
+
+EXPLANATION:
+From the results above, we can deduce that xgboost has a lower RMSE compared to bagging/linear regression which implies its better at predicting price.  Additionally, the r^2 of 0.35 is better than bagging/linear regression which signifies that xgboost is the best model.
+
+
+
+
+
+RF:
+
+```{r}
+
+# Set the seed for reproducibility
+set.seed(123)
+
+# Split the data into training and testing sets
+library(randomForest)
+rf.model<-randomForest(log_price ~ room_type + reviews_per_month + 
+    long_stay + old_listing + 
+    date + minimum_nights+number_of_reviews+reviews_per_month+
+      calculated_host_listings_count+availability_365+number_of_reviews_ltm+time_since_last_review,data = alpha_train, mtry = 4, importance = TRUE)
+
+
+rf.model
+
+# PREDICTING 
+rf.predict<-predict(rf.model, newdata = alpha_test)
+# View(rf.predict)
+
+# RMSE 
+
+rmse <- function(actual, predicted) {
+  sqrt(mean((actual - predicted)^2))
+}
+
+
+rmse_value <- rmse(alpha_test$log_price, rf.predict)
+
+# Variable Importance Plot
+varImpPlot(rf.model)
+
+# CALCULATING RESIDUALS
+residuals <- alpha_test$log_price - rf.predict
+
+# CALCULATING TOTAL SUM OF SQUARES (TSS)
+tss <- sum((alpha_test$log_price - mean(alpha_test$log_price))^2)
+
+# CALCULATING RESIDUAL SUM OF SQUARES (RSS)
+rss <- sum(residuals^2)
+
+# CALCULATING R-SQUARED (R^2)
+r_squared <- 1 - (rss / tss)
+cat("R-squared: ", r_squared, "\n")
+
+# CALCULATING ADJUSTED R-SQUARED
+n <- nrow(alpha_test) # number of observations
+p <- length(rf.model$terms) - 1 # number of predictor variables
+adjusted_r_squared <- 1 - (((1 - r_squared) * (n - 1)) / (n - p - 1))
+cat("Adjusted R-squared: ", adjusted_r_squared, "\n")
+cat("RMSE: ", rmse_value, "\n")
+
+```
+
+```{r}
+#tree1 = rpart(log_price~.,data = testData, method = 'class')
+#rpart.plot(tree1,type = 4)
+
+# Load required libraries
+library(rpart)
+library(rpart.plot)
+
+# Create a decision tree
+tree1 = rpart(log_price ~ room_type + reviews_per_month + 
+    long_stay + old_listing + 
+    date + minimum_nights+number_of_reviews+reviews_per_month+
+      calculated_host_listings_count+availability_365+number_of_reviews_ltm+time_since_last_review, data = alpha_test, method = 'class')
+
+# Plot the decision tree
+rpart.plot(tree1, type = 4)
+```
+
+
+```{r}
+tree1_simpler <- rpart(log_price ~ room_type + reviews_per_month + 
+    long_stay + old_listing + 
+    date + minimum_nights+number_of_reviews+reviews_per_month+
+      calculated_host_listings_count+availability_365+number_of_reviews_ltm+time_since_last_review, data = alpha_test, method = 'class', control = rpart.control(cp = 0.1))
+
+# Plot the simpler tree
+rpart.plot(tree1_simpler, box.palette = "Greens")
+
+
+```
+
+
+
+
+`
+

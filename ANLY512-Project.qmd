@@ -1,0 +1,373 @@
+---
+output-file: html_document
+---
+
+# Lab-5.1: Comparing and Contrasting the results from different predicitive methods on Airbnb Data to see if price Listings had any predictability using location during 2022 within the United States.
+
+**Author**: Karan Uppal
+
+#### Setup
+
+Using the Airbnb dataset that was compiled together using quarterly data. These quarterly updates were made during the year 2022 in a seasonal manner. These records were gathered on the days March 16th, June 8th, September 12th, and December 15th.
+
+Data Source: http://insideairbnb.com/get-the-data
+
+Data Dictionary:
+
+- Price: Price listing
+_ neighbourhood: area ZIP codes 
+- latitude: Uses the World Geodetic System (WGS84) projection for latitude and longitude.
+- longitude: Uses the World Geodetic System (WGS84) projection for latitude and longitude.
+- room_type: All homes are grouped into the following three room types:
+
+Entire place
+Private room
+Shared room
+
+- price: daily price in local currency
+- minimum_nights: minimum number of night stay for the listing (calendar rules may be different)
+- number_of_reviews: The number of reviews the listing has
+- reviews_per_month: The number of reviews the listing has over the lifetime of the listing
+- calculated_host_listings_count: The number of Entire home/apt listings the host has in the current scrape, in the city/region geography
+- availability_365: The availability of the listing 365 days in the future as determined by the calendar. Note a listing may not be available because it has been booked by a guest or blocked by the host.
+- number_of_reviews_ltm: The number of reviews the listing has (in the last 12 months)
+- time_since_last_review: Time in minutes since last review was posted
+- log_price: Log function of price module
+
+```{r}
+require(ISLR)
+require(MASS)
+require(glmnet)
+require(leaps)
+# library
+library(flextable)
+library(leaps)
+library(caret)
+library(readr)
+library(reticulate)
+library(corrplot)
+library(ggfortify)
+library(tidyverse)
+library(zoo)
+library(lubridate)
+library(reshape2)
+library(data.table)
+library(klaR)
+library(feather)
+library(yardstick)
+library(splines)
+library(ISLR)
+library(nnet)
+library(glmnet)
+library(boot)
+library('sparkline')
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load("weights", "interactions", "cjoint", "plm", "interactions", "jtools", "stats", "miceadds", "broom", "RColorBrewer", "ggstatsplot", "ggpubr", "stargazer", "sandwich", "hrbrthemes", "rms", "interplot", "coefplot", "gmodels", "car", "lattice","foreign", "ggplot2", "MASS", "Hmisc", "reshape2", "oddsratio", "tidyr", "psych", "dplyr", "tidyverse", "cjoint", "ISLR","ISLR2","kableExtra","ggExtra","gridExtra")
+
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=60),tidy=TRUE,echo = TRUE)
+
+def.chunk.hook  <- knitr::knit_hooks$get("chunk")
+knitr::knit_hooks$set(chunk = function(x, options) {
+  x <- def.chunk.hook(x, options)
+  ifelse(options$size != "normalsize", paste0("\n \\", options$size,"\n\n", x, "\n\n \\normalsize"), x)
+})
+
+```
+
+Split the data set into a training set and a test set.
+
+```{r}
+set.seed(1)
+# Data
+alpha <-  read.csv('clean_airbnb.csv')
+
+# Drop columns with text data 
+drop <- c('X','id','name','host_id','host_name','room_type','neighbourhood_group', 'last_review','license', 'old_listing','date')
+alpha$neighbourhood <- as.integer(alpha$neighbourhood)
+alpha = alpha[,!(names(alpha) %in% drop)]
+head(alpha)
+```
+
+
+```{r}
+trainIndex <- createDataPartition(alpha$log_price, p = 0.7, list = FALSE)
+alpha_train <- alpha[trainIndex, ]
+alpha_test <- alpha[-trainIndex, ]
+
+# Print the dimensions of the training and testing sets
+cat("Training set dimensions:", dim(alpha_train), "\n")
+cat("Testing set dimensions:", dim(alpha_test), "\n")
+```
+
+```{r, message = FALSE}
+control <- trainControl(method="", number=, repeats = , verbose = TRUE, search = "grid")
+```
+
+## Prediction and Model Evaluation
+
+RMSE or Root Mean Squared Error is the default metrics used to evaluate algorithms on regression datasets in caret. RMSE or Root Mean Squared Error is the average deviation of the predictions from the observations.
+
+We can filter out insignificant independent variables such as minimum_nights, number_of_reviews_ltm, long_stay, and number_of_reviews. We will use the following variables as indicators for location given by neighbourhood and longitude.
+
+```{r, message = FALSE, echo=TRUE}
+# Cross validation and control parameters
+metric = "RMSE"
+tuneLength = 4
+
+linearModelReg = caret::train(log_price ~ neighbourhood + minimum_nights + reviews_per_month + availability_365, data = alpha_train,metric=metric, preProc = c("center", "scale"), method="lm", tuneLength=tuneLength)
+
+LMsum <- summary(linearModelReg)
+LMsum
+```
+
+
+## Ridge Regressions
+
+```{r}
+price <- alpha_train$log_price
+# Fit a ridge regression model with lambda chosen by cross-validation
+cv_fit <- cv.glmnet(x=as.matrix(alpha_train), y = price, family='gaussian',type.measure = "class", alpha = 0, nlambda=100)
+
+# Extract the lambda values and corresponding MSEs
+cv_results <- data.frame(lambda = cv_fit$lambda, mse = cv_fit$cvm)
+
+# Plot the test MSE as a function of the log of the regularization parameter
+ggplot(cv_results, aes(log(lambda), mse)) +
+  geom_line() +
+  scale_x_continuous(name = expression(log(lambda))) +
+  scale_y_continuous(name = "Test MSE")
+
+# Select the lambda value with the lowest cross-validated MSE
+lambda_min <- cv_fit$lambda.min
+
+# Fit a ridge regression model with lambda = lambda_min on the training set
+ridge_fit <- glmnet(x = as.matrix(alpha_train), y = price, family= "poisson", alpha = 0, lambda = lambda_min)
+
+# Make predictions on the testing set
+predictions <- predict(ridge_fit, newx = as.matrix(alpha_test))
+
+# Compute the test error indicators
+test_error <- sqrt(mean((predictions - alpha_test$price)^2))
+
+r_squared <-  R2(predictions,alpha_test$price) 
+
+error.rate.poly <- rmse/mean(alpha_test$price)
+
+
+beta <- ridge_fit$beta[,1]
+
+ridgedf <- data.frame(Algorithm="Ridge Regression",RMSE = test_error, R2 = r_squared , Error =error.rate.poly) 
+
+kable(ridgedf) %>%
+  kable_styling(bootstrap_options = "striped", full_width = F, position = "center")
+```
+
+## Lasso Regression
+
+```{r}
+# Fit a lasso model with lambda chosen by cross-validation
+cv_fit <- cv.glmnet(x = as.matrix(alpha_train), y = price, alpha = 1)
+
+# Extract the lambda values and corresponding MSEs
+cv_results <- data.frame(lambda = cv_fit$lambda, mse = cv_fit$cvm)
+
+# Plot the test MSE as a function of the log of the regularization parameter
+ggplot(cv_results, aes(log(lambda), mse)) +
+  geom_line() +
+  scale_x_continuous(name = expression(log(lambda))) +
+  scale_y_continuous(name = "Test MSE")
+
+# Plot the number of non-zero coefficient estimates as a function of the log of the regularization parameter
+coef_results <- data.frame(lambda = cv_fit$lambda, nonzeros = apply(cv_fit$glmnet.fit$beta != 0, 2, sum))
+ggplot(coef_results, aes(log(lambda), nonzeros)) +
+  geom_line() +
+  scale_x_continuous(name = expression(log(lambda))) +
+  scale_y_continuous(name = "Number of non-zero coefficients")
+
+# Select the lambda value with the lowest cross-validated MSE
+lambda_min <- cv_fit$lambda.min
+
+# Fit a lasso model with lambda = lambda_min on the training set
+lasso_fit <- glmnet(x = as.matrix(alpha_train), y = price, alpha = 1, lambda = lambda_min)
+
+# Make predictions on the testing set
+predictions <- predict(lasso_fit, newx = as.matrix(alpha_test))
+
+# Compute the test error indicators
+test_error <- sqrt(mean((predictions - alpha_test$price)^2))
+r_squared <-  R2(predictions,alpha_test$price) 
+error.rate.poly <- rmse/mean(alpha_test$price)
+  
+lassodf <- data.frame(Algorithm="Lasso Regression",RMSE = test_error, R2 = r_squared , Error =error.rate.poly) 
+
+kable(lassodf) %>%
+  kable_styling(bootstrap_options = "striped", full_width = F, position = "center")
+```
+
+```{r}
+#Training Data
+x <- as.matrix(alpha_train[, -12]) # Extract the predictor variables (all except the response variable)
+y <- alpha_train[, 12] # Extract the response variable (median house value)
+
+
+lambda_seq <- 10^seq(10, -2, length.out = 100)
+
+fit <- glmnet(x, y, alpha = 1, lambda = lambda_seq)
+plot(fit, xvar = "lambda", label = TRUE)
+```
+
+The last 
+## Print the lm model and plot the diagnostic plots
+
+```{r, message = FALSE, results='asis',fig.align='center', fig.height=10, fig.width=10}
+linearplotmodel = lm(log_price ~ neighbourhood + minimum_nights + reviews_per_month + availability_365,data=alpha_train)
+
+stargazer::stargazer(linearplotmodel, type='html', summary=TRUE,report = "vc*stp",ci=TRUE)
+
+#plotting
+par(mfrow=c(2,2))
+plot(linearplotmodel, col="#336699", pch=21)
+
+par(mfrow=c(1,1))
+plot(linearplotmodel, 4, col="336699", pch=21)
+
+plot(linearplotmodel,5, col="336699", pch=21)
+```
+
+As we can see from the graphs above, the residuals vs fitted residuals show a patter which isn't straight, suggesting non-linearity. We can also note that the QQ plot of the standardized residuals does not correlate with normal distribution elements and hence the model isn't sufficient enough to be deemed great. Finally, we can also analyze that the Cook-distant plot showcases a high leverage point.
+
+
+## Linear Regression Prediction & Accuracy.
+
+Using the cross-validated model, find out the accuracy of the model over the test dataset above. Combine all the models in one data frame and print the RMSE, R2 and Error Rate (rmse/mean of the Y). You can use car package directly if needed for the calculations. 
+
+```{r, message = FALSE, echo=TRUE}
+predictions<-predict(linearModelReg,newdata = alpha_test)
+
+rmse<-RMSE(predictions, alpha_test$log_price)
+
+error.rate.linear <- rmse/mean(alpha_test$log_price)
+
+linearr2 <- R2( predictions,alpha_test$log_price) 
+
+lineardf <- data.frame( Algorithm="Linear Regression",RMSE = rmse, R2 = linearr2 , Error =error.rate.linear) 
+
+kable(lineardf) %>%
+   kable_styling(bootstrap_options = "striped", full_width = F, position = "center")
+```
+
+When looking at the R^2, we can note that it's significantly less than the RMSE indicating that there's a smaller possibility of over-fitting.
+
+
+# Polynominal Regression
+
+Fit the squared polynomial
+
+```{r, message = FALSE, results='asis'}
+poly_reg<-lm(log_price~ poly(neighbourhood ,2)+ poly(minimum_nights,2)+ poly(reviews_per_month,2) + poly(availability_365,2), data = alpha_train)
+stargazer::stargazer(poly_reg, type='html', summary=TRUE,report = "vc*stp",ci=TRUE)
+```
+
+
+
+
+
+
+## Polynomial Regression Prediction & Accuracy
+
+Similar to the output of linear regression, the prediction matrix will be made for the polynomial regression.
+
+```{r, message = FALSE, echo=TRUE}
+
+predictionpoly = predict(poly_reg,newdata = alpha_test)
+
+rmsepoly = RMSE(predictions, alpha_test$log_price)
+
+error.rate.poly = rmse/mean(alpha_test$log_price)
+
+polyrsquare =  R2(predictionpoly,alpha_test$log_price) 
+
+
+polydf = data.frame(Algorithm="Polynomial Regression", RMSE = rmsepoly, R2 = polyrsquare , Error =error.rate.poly) 
+
+kable(polydf) %>%
+  kable_styling(bootstrap_options = "striped", full_width = F, position = "center")
+```
+
+Looking at the RMSE, R^2, and Error for both linear regression as well as polynomial regression, we can note that the results are fairly similar as they are relativley high.
+
+
+# Spline Regression
+
+We will run a splines model over the same dataset. In this particular case, we would like to run the splines over the quantile of the market price. This can be achieved by providing different `knots` based on `quantile()`. The model structur eis already given to you, follow the video to complete the details.
+
+
+```{r, message = FALSE}
+
+knots <- quantile(alpha_train$log_price, p = c(0.25, 0.50, 0.75))
+
+splinemodel<-lm(log_price~ bs(reviews_per_month, knots =knots)+ bs(minimum_nights, knots =knots) + bs(neighbourhood, knots = knots)+ bs(availability_365, knots = knots), data = alpha_train)
+```
+
+
+## Spline Regression Prediction & Accuracy
+
+```{r, message = FALSE, echo=TRUE}
+predictionspline <- predict(splinemodel,newdata = alpha_test)
+
+rmsespline<-RMSE(predictionspline, alpha_test$log_price)
+
+error.rate.spline <- rmsespline/mean(alpha_test$log_price)
+
+splinersquare <-  R2(predictionspline,alpha_test$log_price) 
+
+splinedf <- data.frame(Algorithm="Spline Regression",RMSE = rmsespline, R2 = splinersquare , Error =error.rate.spline) 
+
+kable(splinedf) %>%
+  kable_styling(bootstrap_options = "striped", full_width = F, position = "center")
+```
+
+
+# Combine the three Data Frames that contain the different model matrix and comment on the RMSE and R2.
+
+
+```{r}
+final_df = rbind(lineardf, polydf, splinedf)
+
+kable(final_df) %>%
+  kable_styling(bootstrap_options = "striped", full_width = F, position = "center")
+```
+
+Looking at the table in terms of RMSE, we can note that the best model is the spline regression based on the all three indicators where the average deviation of the predictions from the observations was very small compared to the other models. The other two models, are followed up with the Linear model peforming with a significantly higher error and lastly the polynomial model having the worst performance. This, in return, suggests that the Spline model had the best predictability modeling as compared to the other two, where although the Spline models seems to be suggest a relevant method, they all are ill representations in predicting the price used as the dependent variable with the significant independent variables used below.
+
+neighbourhood
+minimum_nights 
+reviews_per_month
+availability_365
+
+## Neural Network Comparisons
+
+The data argument specifies the data frame containing the dependent and independent variables. The hidden argument specifies the number of neurons in the hidden layer.
+
+```{r}
+# Train network and make predictions
+net1 <- nnet(log_price ~ neighbourhood + minimum_nights + reviews_per_month + availability_365, data = alpha_train, size = 20, decay = .001, maxit = 2000, linout = T)
+pred <- predict(net1, newdata = alpha_test)
+
+# Calculate the RMSE
+rmse <- sqrt(mean((alpha_test$log_price - pred)^2))
+
+# Calculate the R-squared
+ss_res <- sum((alpha_test$log_price - predictions)^2)
+ss_tot <- sum((alpha_test$log_price - mean(alpha_test$log_price))^2)
+r_squared <- 1 - (ss_res / ss_tot)
+
+# Calculate the error
+error <- mean(abs(alpha_test$log_price - pred) / alpha_test$log_price)
+
+netdf <- data.frame(Algorithm="1-Layer Neural Network",RMSE = rmse, R2 = r_squared , Error =error) 
+
+kable(netdf) %>%
+  kable_styling(bootstrap_options = "striped", full_width = F, position = "center")
+```
+

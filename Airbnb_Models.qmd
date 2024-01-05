@@ -1,0 +1,461 @@
+---
+title: "ANLY 512 Project Models"
+format:
+  html:
+    theme: default
+---
+
+Using the Airbnb dataset that was compiled together using quarterly data for 2022.   These quartely updates include data as of the following day March 16th, June 8th, September 12th, and December 15th.
+
+Data Source: http://insideairbnb.com/get-the-data
+
+Data Dictionary:
+
+- Price: Price listing
+_ neighbourhood: area ZIP codes 
+- latitude: Uses the World Geodetic System (WGS84) projection for latitude and longitude.
+- longitude: Uses the World Geodetic System (WGS84) projection for latitude and longitude.
+- room_type: All homes are grouped into the following three room types:
+
+Entire place
+Private room
+Shared room
+
+- price: daily price in local currency
+- minimum_nights: minimum number of night stay for the listing (calendar rules may be different)
+- number_of_reviews: The number of reviews the listing has
+- reviews_per_month: The number of reviews the listing has over the lifetime of the listing
+- calculated_host_listings_count: The number of Entire home/apt listings the host has in the current scrape, in the city/region geography
+- availability_365: The availability of the listing 365 days in the future as determined by the calendar. Note a listing may not be available because it has been booked by a guest or blocked by the host.
+- number_of_reviews_ltm: The number of reviews the listing has (in the last 12 months)
+- time_since_last_review: Time in minutes since last review was posted
+- log_price: Log function of price module
+
+```{r}
+require(ISLR)
+require(MASS)
+require(glmnet)
+require(leaps)
+# library
+library(flextable)
+library(leaps)
+library(caret)
+library(readr)
+library(reticulate)
+library(corrplot)
+library(ggfortify)
+library(tidyverse)
+library(zoo)
+library(lubridate)
+library(reshape2)
+library(data.table)
+library(klaR)
+library(feather)
+library(yardstick)
+library(splines)
+library(ISLR)
+library(nnet)
+library(glmnet)
+library(boot)
+library('sparkline')
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load("weights", "interactions", "cjoint", "plm", "interactions", "jtools", "stats", "miceadds", "broom", "RColorBrewer", "ggstatsplot", "ggpubr", "stargazer", "sandwich", "hrbrthemes", "rms", "interplot", "coefplot", "gmodels", "car", "lattice","foreign", "ggplot2", "MASS", "Hmisc", "reshape2", "oddsratio", "tidyr", "psych", "dplyr", "tidyverse", "cjoint", "ISLR","ISLR2","kableExtra","ggExtra","gridExtra")
+
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=60),tidy=TRUE,echo = TRUE)
+
+def.chunk.hook  <- knitr::knit_hooks$get("chunk")
+knitr::knit_hooks$set(chunk = function(x, options) {
+  x <- def.chunk.hook(x, options)
+  ifelse(options$size != "normalsize", paste0("\n \\", options$size,"\n\n", x, "\n\n \\normalsize"), x)
+})
+
+```
+
+Search for all files in the input folder, import and combine
+```{r}
+set.seed(1234)
+ alpha <- read.csv('/Users/aanchaldusija/Downloads/clean_airbnb.csv')
+
+# Drop columns with text data 
+drop <- c('X','id','name','host_id','host_name','neighbourhood_group', 'last_review','license')
+alpha$neighbourhood <- as.integer(alpha$neighbourhood)
+alpha = alpha[,!(names(alpha) %in% drop)]
+head(alpha)
+```
+
+Split the data set into a training set and a test set.
+
+```{r}
+trainIndex <- createDataPartition(alpha$log_price, p = 0.7, list = FALSE)
+alpha_train <- alpha[trainIndex, ]
+alpha_test <- alpha[-trainIndex, ]
+
+# Print the dimensions of the training and testing sets
+cat("Training set dimensions:", dim(alpha_train), "\n")
+cat("Testing set dimensions:", dim(alpha_test), "\n")
+```
+
+## Prediction and Model Evaluation
+
+RMSE or Root Mean Squared Error is a metric used to evaluate and compare different models. Mathematically,RMSE is the average deviation of the predictions from the observations.
+
+
+```{r, message = FALSE, echo=TRUE}
+# Cross validation and control parameters
+# metric = "RMSE"
+# tuneLength = 6
+
+# Neighborhood is not a continuous number because it's a zip code, but the original model treats it as such. This is incorrect and we must treat it as a factor/fixed effect.
+set.seed(2343)
+linearModelReg2 <- lm(log_price ~ room_type + 
+                        long_stay + old_listing + date + as.factor(neighbourhood) +
+                          reviews_per_month+calculated_host_listings_count+                          availability_365+number_of_reviews_ltm+time_since_last_review, 
+                     data = alpha_train)
+summary(linearModelReg2)
+
+R2(predict(linearModelReg2, alpha_train), alpha_train$log_price)
+
+LMsum <- summary(linearModelReg2)
+LMsum
+```
+
+## Print the lm model and plot the diagnostic plots
+
+```{r, message = FALSE, results='asis',fig.align='center', fig.height=10, fig.width=10}
+
+stargazer::stargazer(linearModelReg2, type='html', summary=TRUE,report = "vc*stp",ci=TRUE)
+
+#plotting
+par(mfrow=c(2,2))
+plot(linearModelReg2, col="#336699", pch=21)
+
+par(mfrow=c(1,1))
+plot(linearModelReg2, 4, col="336699", pch=21)
+
+plot(linearModelReg2,5, col="336699", pch=21)
+```
+
+
+As we can see from the graphs above, the residuals vs fitted residuals plot shows an increased spread as the fitted values increase. This suggests potential heteroscedasticity.
+
+We can also note that the QQ plot of the standardized residuals suggests that the residuals are normally distributed, which is a major assumption behind regression.
+
+## Linear Regression Prediction & Accuracy.
+
+
+```{r, message = FALSE, echo=TRUE}
+predictions<-predict(linearModelReg2,newdata = alpha_test)
+
+rmse<-RMSE(predictions, alpha_test$log_price)
+
+error.rate.linear <- rmse/mean(alpha_test$log_price)
+
+linearr2 <- R2(predictions,alpha_test$log_price) 
+
+lineardf <- data.frame(Algorithm="Linear Regression",RMSE = rmse, R2 = linearr2 , Error =error.rate.linear) 
+
+kable(lineardf) %>%
+   kable_styling(bootstrap_options = "striped", full_width = F, position = "center")
+```
+
+
+# Polynominal Regression
+
+Fit the squared polynomial
+
+```{r, message = FALSE, results='asis'}
+set.seed(9999)
+# ONLY NUMERIC VARIABLES
+poly_reg<-lm(log_price~ poly(number_of_reviews,2)+ poly(reviews_per_month,2) + poly(availability_365,2)+ poly(number_of_reviews_ltm,2) + poly(time_since_last_review,2) + poly(calculated_host_listings_count,2), data = alpha_train)
+summary(poly_reg)
+# stargazer::stargazer(poly_reg, type='html', summary=TRUE,report = "vc*stp",ci=TRUE)
+```
+
+## Polynomial Regression Prediction & Accuracy
+
+Similar to the output of linear regression, the prediction matrix will be made for the polynomial regression.
+
+```{r, message = FALSE, echo=TRUE}
+
+predictionpoly = predict(poly_reg,newdata = alpha_test)
+
+rmsepoly = RMSE(predictionpoly, alpha_test$log_price)
+
+error.rate.poly = rmsepoly/mean(alpha_test$log_price)
+
+polyrsquare =  R2(predictionpoly,alpha_test$log_price) 
+
+
+polydf = data.frame(Algorithm="Polynomial Regression", RMSE = rmsepoly, R2 = polyrsquare , Error =error.rate.poly) 
+
+kable(polydf) %>%
+  kable_styling(bootstrap_options = "striped", full_width = F, position = "center")
+```
+
+Looking at the RMSE, R^2, and Error for both linear regression as well as polynomial regression, we can note that the results are fairly similar as they are relatively high.
+
+
+
+# Spline Regression
+
+We will run a splines model over the same dataset. 
+```{r, message = FALSE}
+set.seed(2121)
+# ONLY NUMERIC
+# You dont only have to include bs() numerical variables in the spline models. We can keep all our variables (including the correctly encoded neighbourhood variable) and allow nonlinearity in our numeric variables. 
+
+knots <- quantile(alpha_train$log_price, p = c(0.25, 0.50, 0.75))
+
+splinemodel<-lm(log_price~ as.factor(room_type) + 
+                  bs(reviews_per_month, knots =knots)+ 
+                  bs(number_of_reviews, knots =knots) + 
+                  as.factor(neighbourhood)+ 
+                  old_listing + long_stay + date + 
+                  bs(availability_365, knots = knots) + 
+                  bs(number_of_reviews_ltm, knots = knots) + bs(time_since_last_review, knots = knots) + bs(calculated_host_listings_count, knots = knots) , data = alpha_train)
+
+summary(splinemodel)
+```
+
+## Spline Regression Prediction & Accuracy
+
+```{r, message = FALSE, echo=TRUE}
+predictionspline <- predict(splinemodel,newdata = alpha_test)
+
+rmsespline<-RMSE(predictionspline, alpha_test$log_price)
+
+error.rate.spline <- rmsespline/mean(alpha_test$log_price)
+
+splinersquare <-  R2(predictionspline,alpha_test$log_price) 
+
+splinedf <- data.frame(Algorithm="Spline Regression",RMSE = rmsespline, R2 = splinersquare , Error =error.rate.spline) 
+
+kable(splinedf) %>%
+  kable_styling(bootstrap_options = "striped", full_width = F, position = "center")
+```
+
+## BAGGING
+
+# We deleted the neighorbohood variable as it took too long to run as it was encoded as a categorical variable and there's 79 different neighborhoods. 
+
+```{r}
+set.seed(1234)
+
+mod_bag <- train(
+  log_price ~ as.factor(room_type) + reviews_per_month + 
+    as.factor(long_stay) + as.factor(old_listing) + 
+    as.factor(date) + minimum_nights+number_of_reviews+reviews_per_month+calculated_host_listings_count+availability_365+number_of_reviews_ltm+time_since_last_review,data = alpha_train,
+  method = "treebag",
+  nbagg = 200
+)
+
+mod_bag
+
+```
+
+```{r}
+pred <- predict(mod_bag, newdata = alpha_test)
+
+rmse_bag <- RMSE(pred, alpha_test$log_price)
+r2_bag <- R2(pred, alpha_test$log_price)
+error_bag <- rmse_bag/mean(alpha_test$log_price)
+
+bagdf <- data.frame(Algorithm="Bagging",RMSE = rmse_bag, R2 = r2_bag, Error = error_bag) 
+
+kable(bagdf) %>%
+  kable_styling(bootstrap_options = "striped", full_width = F, position = "center")
+```
+
+
+
+## Random Forest
+```{r}
+library(randomForest)
+dat1<- subset(alpha, select = -c(price))
+
+# Split the data into training and testing sets
+trainIndex <- createDataPartition(dat1$log_price, p = 0.7, list = FALSE)
+trainData <- dat1[trainIndex, ]
+testData <- dat1[-trainIndex, ]
+
+# rf.model<-randomForest(log_price~neighbourhood+number_of_reviews+reviews_per_month+availability_365+number_of_reviews_ltm+time_since_last_review+long_stay+old_listing, data = trainData, mtry = 6, importance = TRUE)
+rf.model<-randomForest(log_price~., data = trainData, mtry = 4, importance = TRUE)
+rf.model
+
+# PREDICTING 
+rf.predict<-predict(rf.model, newdata = testData)
+# View(rf.predict)
+
+# RMSE 
+rmse <- RMSE(testData$log_price, rf.predict)
+
+# Variable Importance Plot
+varImpPlot(rf.model)
+
+# CALCULATING RESIDUALS
+residuals <- testData$log_price - rf.predict
+
+# CALCULATING TOTAL SUM OF SQUARES (TSS)
+tss <- sum((testData$log_price - mean(testData$log_price))^2)
+
+# CALCULATING RESIDUAL SUM OF SQUARES (RSS)
+rss <- sum(residuals^2)
+
+# CALCULATING R-SQUARED (R^2)
+r_squared <- 1 - (rss / tss)
+cat("R-squared: ", r_squared, "\n")
+
+# CALCULATING ADJUSTED R-SQUARED
+n <- nrow(testData) # number of observations
+p <- length(rf.model$terms) - 1 # number of predictor variables
+adjusted_r_squared <- 1 - (((1 - r_squared) * (n - 1)) / (n - p - 1))
+error_rf <- adjusted_r_squared/mean(testData$log_price)
+cat("Adjusted R-squared: ", adjusted_r_squared, "\n")
+cat("RMSE: ", rmse, "\n")
+cat("Error:", error_rf, "\n")
+
+```
+
+
+```{r}
+rf_df <- data.frame(Algorithm="Random Forest",RMSE = rmse, R2 = adjusted_r_squared, Error = error_rf) 
+
+kable(rf_df) %>%
+  kable_styling(bootstrap_options = "striped", full_width = F, position = "center")
+```
+
+
+
+XG Boost
+
+```{r}
+library(readxl)
+library(tidyverse)
+library(xgboost)
+library(caret)
+```
+
+
+```{r}
+xgboost_data <- subset(alpha, select = -c(longitude, price, latitude, long_stay, old_listing, neighbourhood))
+```
+
+```{r}
+names(xgboost_data)
+str(xgboost_data)
+```
+
+
+```{r}
+xgboost_d1 <- predict(dummyVars(~room_type,xgboost_data), newdata = xgboost_data)
+xgboost_d2 <- predict(dummyVars(~as.character(date),xgboost_data), newdata = xgboost_data)
+
+#Changed room_type into a dummy variable as its a categorical variable and xgboost only works with matrix (numerical) data
+xgboost_data <- cbind(xgboost_data, xgboost_d1, xgboost_d2) # Combines the dataframe
+xgboost_data <- subset(xgboost_data, select = -c(room_type, date)) # Remove room_type
+```
+
+## Create training set indices with 80% of data: we are using the caret package to do this
+
+```{r}
+# Create index for testing and training data
+inTrain <- createDataPartition(y = xgboost_data$log_price, p = 0.8, list = FALSE)
+# subset xgboost_data to training
+train <- xgboost_data[inTrain,]
+# subset the rest to test
+test <- xgboost_data[-inTrain,]
+```
+
+```{r}
+train_features <- subset(train, select = -c(log_price)) %>%
+  data.frame()
+
+train_labels <- train$log_price                         #y_train
+
+test_features <- subset(test, select = -c(log_price)) %>%
+  data.frame()
+
+test_labels <- test$log_price                           #y_test
+
+
+dtrain <- xgb.DMatrix(data = as.matrix(train_features), label = train_labels)
+params <- list(objectives = 'reg:squarederror', eval_metric = 'rmse', nthread = 4 , eta = 0.01, max_depth = 4, nrounds = 10, gamma = 0, min_child_weight = 1, subsample = 1, colsample_bytree = seq(0.5, 0.9, length.out = 5))
+
+bstDMatrix <- xgboost(data = dtrain, max.depth = 2, eta = 1, nthread = 4, nrounds = 10)
+
+```
+
+```{r}
+dtest <- xgb.DMatrix(data = as.matrix(test_features), label = test_labels)
+
+y_pred <- predict(bstDMatrix, newdata = dtest)
+
+error <- RMSE(test_labels, y_pred) 
+
+R2 <- R2(test_labels, y_pred) 
+xgb_error <- R2/mean(test$log_price)
+
+
+cat("The RMSE is:", mean(error), "\n")
+cat("The R^2 is:", R2, "\n")
+cat("The error is:", xgb_error, "\n")
+
+```
+
+
+```{r}
+xg_df <- data.frame(Algorithm="XG Boost",RMSE = error, R2 = R2, Error = xgb_error) 
+
+kable(xg_df) %>%
+  kable_styling(bootstrap_options = "striped", full_width = F, position = "center")
+```
+
+
+```{r}
+#tree1 = rpart(log_price~.,data = testData, method = 'class')
+#rpart.plot(tree1,type = 4)
+
+```
+
+
+
+```{r}
+#tree1_simpler <- rpart(log_price ~ ., data = testData, method = 'class', control = rpart.control(cp = 0.1))
+
+# Plot the simpler tree
+#rpart.plot(tree1_simpler)
+```
+
+
+
+# Combine the three Data Frames that contain the different model matrix and comment on the RMSE and R2.
+
+
+```{r}
+final_df <- rbind(lineardf,polydf,splinedf,bagdf, rf_df, xg_df)
+
+kable(final_df) %>%
+  kable_styling(bootstrap_options = "striped", full_width = F, position = "center")
+```
+
+Looking at the table in terms of test RMSE & R-squared, we can note that the best model is Random Forest. After Random Forest, we see spline is the second best model.
+
+
+
+
+
+
+
+Our final spline model used the following variables:
+
+Room Type
+Reviews per month
+Number of Reviews
+Neighborhood
+Old Listing
+Long Stay
+Date
+Availability_365
+Number of reviews LTM
+Time Since Last Review 
+Calculated Host Listing Count
